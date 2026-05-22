@@ -1,4 +1,4 @@
-# scqlog — Score, Query
+# scqlog — Score, Cluster, Query
 
 **scqlog** converts Apache/NGINX server log files into interactive HTML dashboards
 with built-in security attack detection.
@@ -7,6 +7,7 @@ It implements a three-signal framework:
 | Signal | Technology | What it adds |
 |--------|-----------|--------------|
 | **Score** | OWASP CRS rules (PL 1–4) | Integer match count per attack category |
+| **Cluster** | Drain3 template mining | Stable cluster ID grouping structurally similar URLs |
 | **Query** | DuckDB-WASM + Parquet | In-browser SQL over millions of rows, zero back-end |
 
 Source code: <https://github.com/mahendradata/scqlog>
@@ -38,7 +39,14 @@ For every input `.log` file, `scqlog` runs the following pipeline:
    also attempted. This makes obfuscated attack payloads readable to both the rule
    detectors and the human analyst.
 
-3. **Attack detection** (`scqlog/attack_detector.py`) — The decoded URL is scanned
+3. **Template clustering** (`drain3`) — The decoded URL is fed into a Drain3
+   `TemplateMiner` configured with attack-aware delimiters (`'`, `"`, `;`, `<`, `>`,
+   `|`, `` ` ``, `$`, `\`, etc.). Drain3 returns a stable `cluster_id` and a
+   `template_mined` string, so structurally similar requests (e.g. thousands of
+   `/api/v1/users/<*>` hits) collapse into a single template you can group by in
+   DuckDB.
+
+4. **Attack detection** (`scqlog/attack_detector.py`) — The decoded URL is scanned
    against eight attack categories. Patterns are loaded exclusively from OWASP CRS
    rule files in `scqlog/crs/` at startup (filtered by `CRS_PARANOIA_LEVEL`); there
    is no built-in regex fallback, so a category whose CRS file is missing produces a
@@ -47,13 +55,13 @@ For every input `.log` file, `scqlog` runs the following pipeline:
    boolean — a request matching 8 SQLi rules is more confidently malicious than one
    matching 1.
 
-4. **Columnar output** (`scqlog/parquet_generator.py`) — `LogEntry` objects are
-   converted to a pandas DataFrame and written as Parquet with Snappy compression,
-   dictionary encoding, and column statistics. Statistics enable DuckDB's predicate
-   pushdown so the WASM engine can skip whole row groups that can't satisfy a `WHERE`
-   clause.
+5. **Columnar output** (`scqlog/parquet_generator.py`) — `LogEntry` objects are
+   converted to a pandas DataFrame (with a `frequency` column added via groupby) and
+   written as Parquet with Snappy compression, dictionary encoding, and column
+   statistics. Statistics enable DuckDB's predicate pushdown so the WASM engine can
+   skip whole row groups that can't satisfy a `WHERE` clause.
 
-5. **Self-contained dashboard** (`scqlog/html_generator.py`) — A single HTML file is
+6. **Self-contained dashboard** (`scqlog/html_generator.py`) — A single HTML file is
    generated per log. It embeds the column list and the Parquet filename; on page
    load, DuckDB WASM fetches the Parquet over HTTP and registers it as a table.
 
@@ -84,6 +92,8 @@ and the dashboard works without a Python backend.
 - **Log Parsing**: Parses Apache/NGINX combined log format with URL-decoding and Base64 detection
 - **Attack Detection**: 8 attack categories backed by **OWASP CRS** rules — SQL injection, XSS, path traversal, command injection, RCE, LFI, RFI, webshell probing. Detection results are integer match counts (`*_score`), not booleans
 - **Configurable Paranoia**: `CRS_PARANOIA_LEVEL` (or `-pl` flag) selects how aggressively CRS rules fire (1–4)
+- **Drain3 Template Clustering**: Each request is assigned a cluster ID and mined template, so structurally similar URLs collapse into one analysable group
+- **Template Frequency**: A `frequency` column counts how many rows share each `drain3_template_id`, making it easy to spot common request shapes vs. one-off requests
 - **Columnar Storage**: Outputs compressed Parquet (Snappy + dictionary encoding + statistics) for fast filtering
 - **Interactive Dashboard**: Browser-based visualisation with DuckDB WASM for SQL filtering
 - **Memory-Safe Pagination**: Uses `LIMIT/OFFSET` queries to handle large datasets without browser crashes
@@ -101,6 +111,7 @@ and the dashboard works without a Python backend.
 - **Dependencies** (declared in `pyproject.toml`, pinned in `requirements.txt`):
   - `pandas==3.0.2`
   - `pyarrow==24.0.0`
+  - `drain3==0.9.11` — log template clustering
 - **Docker**: 20.10+ (optional, for containerised deployment)
 - **Browser**: Modern browser with WebAssembly support (Chrome, Firefox, Safari, Edge)
 
@@ -202,18 +213,20 @@ scqlog/                          # Root of the repository
 │   ├── __init__.py
 │   ├── cli.py                   # `scqlog` CLI entry point (argparse + pipeline orchestration)
 │   ├── config.py                # Configuration from environment variables
-│   ├── parser.py                # Log parser — dual-format regex
+│   ├── parser.py                # Log parser — dual-format regex + Drain3 templating
 │   ├── attack_detector.py       # Attack detection (OWASP CRS rules only, lazy load)
 │   ├── crs_loader.py            # Loads @rx patterns from OWASP CRS .conf files
 │   ├── crs/                     # OWASP CRS rule files (.conf)
-│   ├── parquet_generator.py     # DataFrame → Parquet conversion
+│   ├── parquet_generator.py     # DataFrame → Parquet conversion (adds `frequency` column)
 │   ├── html_generator.py        # Interactive dashboard generator (DuckDB WASM)
 │   └── utils.py                 # Utility functions
-└── eval/                        # Evaluation suite for the Score signal
+└── eval/                        # Evaluation suite for the three-signal framework
     ├── __init__.py
-    ├── _common.py               # Shared helpers (percentile, CSV/markdown writers)
+    ├── _common.py               # Shared helpers (ARI, purity, TemplateMiner factory)
     ├── paranoia_sensitivity.py  # Score signal: PL=1..4 sweep
-    └── run_all.py               # Run all evals and write an index README
+    ├── cluster_stability.py     # Cluster signal: ARI under shuffled input
+    ├── delimiter_sensitivity.py # Cluster design: attack-aware vs default delimiters
+    └── run_all.py               # Run all three evals and write an index README
 ```
 
 ---
@@ -231,8 +244,8 @@ scqlog/                          # Root of the repository
 
 | Function/Class | Description |
 |----------------|-------------|
-| `LogEntry` | Dataclass representing a parsed log entry with 21 fields (13 core + 8 attack-score) |
-| `COLUMNS` | Module-level list of `LogEntry` field names. Used as the DataFrame/Parquet schema |
+| `LogEntry` | Dataclass representing a parsed log entry with 23 fields (13 core + 2 Drain3 + 8 attack-score) |
+| `COLUMNS` | Module-level list of `LogEntry` field names, with `frequency` inserted after `drain3_template`. Used as the DataFrame/Parquet schema |
 | `parse_log_file(filepath)` | Generator yielding a `LogEntry` for every line in the file |
 | `parse_line(line, line_number)` | Parses a single log line; tries `LOG_PATTERN` then `LOG_PATTERN_RAW_REQUEST`, falls back to a `'-'`-filled entry |
 | `decode_value(value)` | URL-decodes and optionally Base64-decodes a string |
@@ -257,7 +270,7 @@ scqlog/                          # Root of the repository
 
 | Function | Description |
 |----------|-------------|
-| `entries_to_dataframe(entries)` | Converts a list of `LogEntry` to a pandas DataFrame ordered per `COLUMNS` |
+| `entries_to_dataframe(entries)` | Converts a list of `LogEntry` to a pandas DataFrame, computes the `frequency` column (count of rows sharing each `drain3_template_id`), and orders columns per `COLUMNS` |
 | `save_parquet(df, output_path)` | Saves DataFrame to Parquet with Snappy compression, dictionary encoding, and column statistics |
 
 ### scqlog/html_generator.py
@@ -328,6 +341,14 @@ Example:
 | `user_agent` | str | Client user agent string |
 | `extra` | str | Anything trailing the standard fields |
 
+**Drain3 log-template clustering:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `drain3_template_id` | int | Cluster ID assigned by Drain3 to structurally similar URLs (`0` = no URL) |
+| `drain3_template` | str | Mined template string with variable parts replaced by `<*>` |
+| `frequency` | int | Number of rows in this log file sharing the same `drain3_template_id`. High values flag common request shapes; `frequency = 1` flags one-off requests |
+
 **Attack detection columns:**
 
 Each column is an **integer count of CRS rules that matched** (`0` = no match).
@@ -383,6 +404,15 @@ method = 'POST' AND url LIKE '%admin%'
 sqli_score > 0 OR xss_score > 0 OR path_traversal_score > 0 OR cmd_injection_score > 0
    OR rce_score > 0 OR lfi_score > 0 OR rfi_score > 0 OR webshell_score > 0
 
+-- Most common request shapes (high template frequency)
+frequency >= 100
+
+-- One-off requests (unique template, often suspicious)
+frequency = 1
+
+-- Drill into one specific Drain3 cluster
+drain3_template_id = 42
+
 -- Show only non-HTTP / malformed requests
 method = '-'
 ```
@@ -404,19 +434,21 @@ method = '-'
 
 ## Evaluation
 
-The `eval/` package quantifies the Score signal. Every evaluation runs against any
-`.log` file the pipeline can already parse — no labelled ground-truth dataset is
-required. CSV + markdown reports are written next to the input log under
-`<log_stem>_eval/` (configurable via `--output-dir`).
+The `eval/` package quantifies the Score and Cluster signals. Every evaluation runs
+against any `.log` file the pipeline can already parse — no labelled ground-truth
+dataset is required. CSV + markdown reports are written to `eval_results/`
+(configurable via `--output-dir`).
 
-### Running the eval
+### Running an eval
 
 ```bash
-# Run all evals (writes a README.md index in the output dir)
+# All three at once (writes a README.md index in the output dir)
 python -m eval.run_all data/access.log
 
-# Or standalone
-python -m eval.paranoia_sensitivity data/access.log
+# Or one at a time
+python -m eval.paranoia_sensitivity   data/access.log
+python -m eval.cluster_stability      data/access.log --n-runs 10
+python -m eval.delimiter_sensitivity  data/access.log -pl 2
 
 # Cap the number of lines parsed for quick iteration
 python -m eval.run_all data/access.log --max-lines 50000
@@ -427,18 +459,25 @@ python -m eval.run_all data/access.log --max-lines 50000
 | Eval | Signal | What it answers |
 |------|--------|-----------------|
 | `paranoia_sensitivity` | Score | How does the per-category score distribution change across CRS paranoia levels 1–4? Is the PL dial monotone in detection breadth? |
+| `cluster_stability` | Cluster | Drain3 is online and order-sensitive. Does the partition stay stable under shuffled input? Reported as pairwise Adjusted Rand Index (ARI) across N runs. |
+| `delimiter_sensitivity` | Cluster (design choice) | Does the attack-aware delimiter set compress the cluster space versus default Drain3 tokenisation *while preserving non-singleton purity* against the dominant CRS attack category? |
 
-### Why this matters
+### Why these three
 
-If `paranoia_sensitivity` shows non-monotone behaviour across PLs, the Score dial
-is not the tunable knob it claims to be. The eval reports `n_rules`, `n_flagged`,
-`pct_flagged`, `mean_score`, and `p95_score` per (paranoia level, attack category)
-pair, making the trade-off between recall and false-positive rate concrete.
+The framework's claim is that combining (a) tunable rule-count scoring, (b)
+ordering-stable templates, and (c) ad-hoc SQL gives an analyst a useful triage
+workflow. Each eval falsifies one part of that claim if it fails:
+
+- If `paranoia_sensitivity` shows non-monotone behaviour, the Score dial is not the tunable knob it claims to be.
+- If `cluster_stability`'s mean ARI is low (≪ 1.0), the Cluster signal is run-specific noise rather than a triage primitive.
+- If `delimiter_sensitivity` shows attack-aware delimiters give the same compression and purity as the default, the design choice is gratuitous.
 
 ### Reading the outputs
 
-Each eval writes a CSV (machine-readable) and a `.md` summary with a built-in
-interpretation section. Pass `--debug` to see per-URL scoring progress.
+Each eval writes a CSV (machine-readable) and a `.md` summary (with a built-in
+interpretation paragraph). The `delimiter_sensitivity.md` summary automatically
+computes the compression-vs-purity trade-off and reports whether attack-aware
+delimiters win on this workload.
 
 ---
 

@@ -2,7 +2,7 @@
 
 Usage:
     python -m eval.run_all data/access.log
-    python -m eval.run_all data/access.log --output-dir paper/eval_results
+    python -m eval.run_all data/access.log --output-dir paper/eval_results --n-runs 10
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from eval import paranoia_sensitivity
+from eval import paranoia_sensitivity, cluster_stability, delimiter_sensitivity
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,15 @@ def main() -> None:
              "(written next to the input log)",
     )
     p.add_argument("--max-lines", type=int, default=None)
+    p.add_argument("--n-runs", type=int, default=5,
+                   help="Cluster-stability run count (default: %(default)s)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "-pl", "--paranoia-level", type=int, default=1, choices=[1, 2, 3, 4],
+        help="CRS paranoia level used by the delimiter-sensitivity eval "
+             "(the paranoia-sensitivity eval sweeps all four PLs regardless). "
+             "Default: %(default)s",
+    )
     p.add_argument("--debug", action="store_true")
     args = p.parse_args()
 
@@ -43,9 +52,27 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("=" * 60)
-    logger.info("[1/1] Score signal: paranoia-level sensitivity")
+    logger.info("[1/3] Score signal: paranoia-level sensitivity")
     logger.info("=" * 60)
     paranoia_sensitivity.run(args.log_path, args.output_dir, args.max_lines)
+
+    logger.info("=" * 60)
+    logger.info("[2/3] Cluster signal: stability across runs")
+    logger.info("=" * 60)
+    cluster_stability.run(
+        args.log_path, args.output_dir,
+        n_runs=args.n_runs, seed=args.seed,
+        max_lines=args.max_lines,
+    )
+
+    logger.info("=" * 60)
+    logger.info("[3/3] Cluster signal: delimiter design choice")
+    logger.info("=" * 60)
+    delimiter_sensitivity.run(
+        args.log_path, args.output_dir,
+        max_lines=args.max_lines,
+        paranoia_level=args.paranoia_level,
+    )
 
     # Write a top-level index pointing at the per-eval reports.
     index = args.output_dir / "README.md"
@@ -56,6 +83,10 @@ def main() -> None:
         f.write("|------|-----|----------|\n")
         f.write("| Paranoia sensitivity (Score signal) | "
                 "`paranoia_sensitivity.csv` | `paranoia_sensitivity.md` |\n")
+        f.write("| Cluster stability (Cluster signal) | "
+                "`cluster_stability_pairwise_ari.csv` | `cluster_stability.md` |\n")
+        f.write("| Delimiter sensitivity (Cluster design) | "
+                "`delimiter_sensitivity.csv` | `delimiter_sensitivity.md` |\n")
     logger.info(f"Wrote index: {index}")
 
 

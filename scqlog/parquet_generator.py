@@ -22,10 +22,12 @@ def entries_to_dataframe(entries: list[LogEntry]) -> pd.DataFrame:
         entries: List of parsed log entries
 
     Returns:
-        DataFrame with log data, columns ordered per the COLUMNS schema.
+        DataFrame with log data, including a `frequency` column counting how
+        many rows share each `drain3_template_id`.
     """
     data = [asdict(entry) for entry in entries]
     df = pd.DataFrame(data)
+    df['frequency'] = df.groupby('drain3_template_id')['drain3_template_id'].transform('size').astype('int64')
     return df[COLUMNS]
 
 

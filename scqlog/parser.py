@@ -1,9 +1,9 @@
 """Web server log parser for Apache/NGINX combined log format.
 
 Parses log files line by line and extracts structured fields into LogEntry objects.
-Every line produces exactly one LogEntry — malformed lines are represented with
-placeholder '-' values to ensure a consistent output schema. Includes CRS-based
-attack detection for security analysis.
+Every line produces exactly one LogEntry - malformed lines are represented with
+placeholder '-' values to ensure consistent output schema. Includes attack detection
+for security analysis.
 
 Supported Log Formats:
 
@@ -34,9 +34,38 @@ from dataclasses import dataclass, fields
 from typing import Generator
 from urllib.parse import unquote
 
+from drain3 import TemplateMiner
+from drain3.template_miner_config import TemplateMinerConfig
+
 from scqlog.attack_detector import detect_attacks
 
 logger = logging.getLogger(__name__)
+
+_drain3_config = TemplateMinerConfig()
+_drain3_config.profiling_enabled = False
+_drain3_config.drain_extra_delimiters = [
+    # URL structure
+    "/", "?", "&", "=", ":", "#",
+    # SQLi — string delimiters, statement terminator, function calls, list separator
+    "'", '"', ";", "(", ")", ",",
+    # XSS — HTML tag brackets
+    "<", ">",
+    # Command injection — pipe, backtick, dollar (command substitution)
+    "|", "`", "$", "\\",
+    # Path traversal / LFI — dot and backslash
+    ".", "\\",
+    # URL encoding, misc attack characters
+    "%", "@", "!", "+", "~", "^", "[", "]", "{", "}",
+]
+_template_miner = TemplateMiner(persistence_handler=None, config=_drain3_config)
+
+
+def _get_drain3_template(url: str) -> tuple[int, str]:
+    if not url or url == '-':
+        return 0, '-'
+    result = _template_miner.add_log_message(url)
+    return int(result['cluster_id']), result['template_mined']
+
 
 # Apache/NGINX combined log format regex pattern (standard request)
 LOG_PATTERN = re.compile(
@@ -95,6 +124,10 @@ class LogEntry:
     user_agent: str
     extra: str
 
+    # Drain3 log template clustering
+    drain3_template_id: int
+    drain3_template: str
+
     # Attack detection columns (number of CRS rules matched, 0 = none)
     sqli_score: int
     xss_score: int
@@ -106,8 +139,12 @@ class LogEntry:
     webshell_score: int
 
 
-# Column names derived from LogEntry fields — the complete Parquet/DataFrame schema.
-COLUMNS = [field.name for field in fields(LogEntry)]
+# Column names derived from LogEntry fields, with `frequency` (count of rows
+# sharing the same drain3_template_id) inserted right after drain3_template.
+# `frequency` is computed in entries_to_dataframe, not on individual LogEntry instances.
+_BASE_COLUMNS = [field.name for field in fields(LogEntry)]
+_FREQ_INSERT_IDX = _BASE_COLUMNS.index('drain3_template') + 1
+COLUMNS = _BASE_COLUMNS[:_FREQ_INSERT_IDX] + ['frequency'] + _BASE_COLUMNS[_FREQ_INSERT_IDX:]
 
 
 def is_likely_base64(s: str) -> bool:
@@ -192,6 +229,8 @@ def _create_fallback_entry(line_number: int) -> LogEntry:
         referrer='-',
         user_agent='-',
         extra='-',
+        drain3_template_id=0,
+        drain3_template='-',
         sqli_score=0,
         xss_score=0,
         path_traversal_score=0,
@@ -218,6 +257,8 @@ def _parse_standard_log(groups: dict, line_number: int) -> LogEntry:
     url = decode_value(groups['url'])
     referrer = decode_value(groups.get('referrer') or '-')
 
+    drain3_template_id, drain3_template = _get_drain3_template(url)
+
     # Perform attack detection on the URL
     attacks = detect_attacks(url)
 
@@ -235,6 +276,8 @@ def _parse_standard_log(groups: dict, line_number: int) -> LogEntry:
         referrer=referrer,
         user_agent=groups.get('user_agent') or '-',
         extra=groups.get('extra') or '',
+        drain3_template_id=drain3_template_id,
+        drain3_template=drain3_template,
         # Attack detection results
         sqli_score=attacks.sqli_score,
         xss_score=attacks.xss_score,
@@ -273,6 +316,8 @@ def _parse_raw_request_log(groups: dict, line_number: int) -> LogEntry:
     # Store raw request content in url field (empty string becomes '-')
     url = raw_request if raw_request else '-'
 
+    drain3_template_id, drain3_template = _get_drain3_template(url)
+
     # Perform attack detection on raw request content (may contain attack patterns)
     attacks = detect_attacks(url) if url != '-' else None
 
@@ -290,6 +335,8 @@ def _parse_raw_request_log(groups: dict, line_number: int) -> LogEntry:
         referrer=referrer,
         user_agent=groups.get('user_agent') or '-',
         extra=groups.get('extra') or '',
+        drain3_template_id=drain3_template_id,
+        drain3_template=drain3_template,
         # Attack detection on raw request content
         sqli_score=attacks.sqli_score if attacks else 0,
         xss_score=attacks.xss_score if attacks else 0,
