@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scqlog"
+version = "2.0.0"
+description = "Score, Cluster, Query — interactive web-attack forensics for Apache/NGINX logs"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Mahendra Data",        email = "mahendra.data@ub.ac.id"  },
+  { name = "Tirana Noor Fatyanosa", email = "fatyanosa@ub.ac.id"     },
+  { name = "Fariz Andri Bakhtiar",  email = "fariz@ub.ac.id"         },
+]
+keywords = ["web-log", "security", "owasp", "crs", "drain3", "duckdb", "parquet", "forensics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: System :: Logging",
+]
+dependencies = [
+  "cachetools==4.2.1",
+  "drain3==0.9.11",
+  "jsonpickle==1.5.1",
+  "numpy==2.4.4",
+  "pandas==3.0.2",
+  "pyarrow==24.0.0",
+  "python-dateutil==2.9.0.post0",
+  "six==1.17.0",
+]
+
+[project.urls]
+Homepage   = "https://github.com/mahendradata/scqlog"
+Repository = "https://github.com/mahendradata/scqlog"
+Issues     = "https://github.com/mahendradata/scqlog/issues"
+
+[project.scripts]
+scqlog = "scqlog.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scqlog*"]
+
+[tool.setuptools.package-data]
+scqlog = ["crs/*.conf"]
