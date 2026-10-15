@@ -107,69 +107,129 @@ and the dashboard works without a Python backend.
 
 ## Requirements
 
-- **Python**: 3.11+
-- **Dependencies** (declared in `pyproject.toml`, pinned in `requirements.txt`):
-  - `pandas==3.0.2`
-  - `pyarrow==24.0.0`
-  - `drain3==0.9.11` — log template clustering
-- **Docker**: 20.10+ (optional, for containerised deployment)
-- **Browser**: Modern browser with WebAssembly support (Chrome, Firefox, Safari, Edge)
+You need **one** of the following, depending on how you want to run scqlog:
+
+| Option | What you need | Best for |
+|--------|---------------|----------|
+| **A. Native Python with `uv`** | [uv](https://docs.astral.sh/uv/) (it downloads Python 3.11+ for you if needed) and [Git](https://git-scm.com/downloads) | Development, running the eval suite, processing logs anywhere on disk |
+| **B. Docker** | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/macOS) or Docker Engine 20.10+ (Linux) and Git | One command, no Python setup on the host |
+
+Both options need a **modern browser** with WebAssembly support (Chrome, Firefox,
+Safari, Edge) to view the dashboard.
+
+Python dependencies are declared in `pyproject.toml` and locked in `uv.lock`:
+`pandas`, `pyarrow`, and `drain3` (log template clustering), plus their transitive
+dependencies.
 
 ---
 
 ## Installation
 
-### From GitHub (recommended)
+### 1. Get the source code (all platforms)
 
 ```bash
 git clone https://github.com/mahendradata/scqlog
 cd scqlog
-pip install -e .
 ```
 
-This installs the `scqlog` command into your environment.
+### 2A. Native install with `uv`
 
-### From PyPI (once published)
+**Install uv** (once per machine):
+
+| OS | Command |
+|----|---------|
+| **Windows** (PowerShell) | `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"` <br>or `winget install --id=astral-sh.uv -e` |
+| **macOS** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` <br>or `brew install uv` |
+| **Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+
+Close and reopen your terminal afterwards so `uv` is on your `PATH`, then check
+it with `uv --version`.
+
+**Install scqlog and its dependencies** (from the `scqlog` directory; the
+command is the same on Windows, macOS and Linux):
 
 ```bash
-pip install scqlog
+uv sync
 ```
 
-### Using Docker
+This creates a project virtual environment in `.venv/` with the exact versions
+from `uv.lock`. If no suitable interpreter is found, uv installs Python 3.11 first
+(the version is pinned in `.python-version`). You don't need to activate the
+environment: prefix commands with `uv run`.
 
-```bash
-git clone https://github.com/mahendradata/scqlog
-cd scqlog
-docker compose build
-```
+### 2B. Docker install
+
+1. Install Docker:
+   - **Windows**: [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
+     (WSL 2 backend recommended). Start Docker Desktop before using `docker`.
+   - **macOS**: [Docker Desktop for Mac](https://docs.docker.com/desktop/setup/install/mac-install/)
+     (pick the Apple Silicon or Intel build). Start Docker Desktop before using `docker`.
+   - **Linux**: [Docker Engine](https://docs.docker.com/engine/install/) for your
+     distribution. To run `docker` without `sudo`, add yourself to the `docker` group
+     (`sudo usermod -aG docker $USER`), then log out and back in.
+2. Build the image (from the `scqlog` directory; same on every platform):
+
+   ```bash
+   docker build -t scqlog .
+   ```
+
+   Rebuild after pulling new code. The image installs from the same `uv.lock`, so it
+   has exactly the same dependency versions as the native install.
 
 ---
 
 ## Usage
 
-`scqlog` takes one or more `.log` files as positional arguments. For each input
-`path/to/access.log`, outputs are written to a sibling directory named after the file
-stem: `path/to/access/access.parquet` and `path/to/access/access.html`.
+For each input `path/to/access.log`, scqlog writes its outputs to a sibling
+directory named after the file stem: `path/to/access/access.parquet` and
+`path/to/access/access.html`.
 
-### Option A: pip install (recommended)
+The dashboard loads the Parquet file over HTTP, so it **must be opened through a
+web server**, not by double-clicking the HTML file (`file://` URLs block the fetch).
+Both options below include that step.
+
+The examples use the bundled `data/samples.log`. Put your own `.log` files in
+`data/` (or anywhere else, for Option A).
+
+### Option A: Native Python with `uv`
+
+These commands work the same in Windows PowerShell, the macOS Terminal and Linux shells:
 
 ```bash
-# Process one or more log files
-scqlog data/access.log
-scqlog data/*.log
+# 1. Process one or more log files
+uv run scqlog data/samples.log
 
-# Increase OWASP CRS paranoia level (1=fewest false positives, 4=max detection)
-scqlog -pl 2 data/access.log
-scqlog --paranoia-level 4 data/access.log
+# 2. Serve the data/ directory
+uv run python -m http.server 8000 --directory data
 
-# Show version
-scqlog --version
-
-# Serve the dashboard (required — WASM cannot load Parquet over file://)
-cd data/access
-python -m http.server 8000
-# Open http://localhost:8000/access.html
+# 3. Open http://localhost:8000/samples/samples.html in your browser.
+#    Press Ctrl+C in the terminal to stop the server.
 ```
+
+More examples:
+
+```bash
+# Several files at once (macOS / Linux shells expand the wildcard)
+uv run scqlog data/*.log
+# Windows PowerShell does not expand wildcards for programs; list the files
+uv run scqlog data/a.log data/b.log
+
+# Raise the OWASP CRS paranoia level (1 = fewest false positives, 4 = max detection)
+uv run scqlog -pl 2 data/samples.log
+uv run scqlog --paranoia-level 4 data/samples.log
+
+# Logs outside the repository work too; outputs go next to the input file
+uv run scqlog /var/log/nginx/access.log        # macOS / Linux
+uv run scqlog C:\logs\access.log               # Windows
+
+# Show version / help
+uv run scqlog --version
+uv run scqlog --help
+```
+
+> **Tip:** if you prefer an activated environment, run `.venv\Scripts\activate`
+> (Windows PowerShell) or `source .venv/bin/activate` (macOS/Linux) once. After that
+> you can type `scqlog ...` and `python -m http.server ...` without the `uv run` prefix.
 
 **CLI flags:**
 
@@ -178,23 +238,73 @@ python -m http.server 8000
 | `-pl`, `--paranoia-level {1,2,3,4}` | `CRS_PARANOIA_LEVEL` env var, else `1` | OWASP CRS paranoia level — higher detects more attacks but increases false-positive rate |
 | `--version` | — | Print version and exit |
 
-### Option B: Docker Compose
+### Option B: Docker
 
-```bash
-# Place .log files in data/ (bind-mounted into the container at /app/data)
-cp your-access.log data/
+The container processes **every `*.log` file** in the mounted directory, then
+serves that directory on port 8000. Mount your log directory at `/app/data`:
 
-# Build and run — processes data/*.log then starts HTTP server on :8000
-docker compose up --build
+**Windows (PowerShell):**
 
-# Open http://localhost:8000/your-access/your-access.html
+```powershell
+docker run --rm -p 8000:8000 -v "${PWD}\data:/app/data" scqlog
 ```
 
-The container's `entrypoint.sh` runs `scqlog data/*.log` and then serves `/app/data`
-on port 8000. Outputs are written next to each input as
-`/app/data/<basename>/<basename>.{parquet,html}`, and because `./data` is
-bind-mounted from the host, the generated files also appear in your local `data/`
-directory.
+**Windows (Command Prompt):**
+
+```bat
+docker run --rm -p 8000:8000 -v "%cd%\data:/app/data" scqlog
+```
+
+**macOS:**
+
+```bash
+docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" scqlog
+```
+
+**Linux** (the `--user` flag makes the generated files owned by you instead of root):
+
+```bash
+docker run --rm -p 8000:8000 --user "$(id -u):$(id -g)" -v "$(pwd)/data:/app/data" scqlog
+```
+
+Then open <http://localhost:8000/samples/samples.html> (in general,
+`http://localhost:8000/<basename>/<basename>.html`). Press `Ctrl+C` to stop the
+container. Because `data/` is bind-mounted, the generated files stay in your
+local `data/` directory, and you can serve them again later with Option A or any static
+web server.
+
+More examples (shown with the macOS/Linux mount syntax; on Windows, use the
+mount syntax shown above):
+
+```bash
+# Arguments after the image name are passed to scqlog, e.g. paranoia level 2
+docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" scqlog -pl 2
+
+# Or set it through the environment
+docker run --rm -p 8000:8000 -e CRS_PARANOIA_LEVEL=3 -v "$(pwd)/data:/app/data" scqlog
+
+# Port 8000 already in use? Map another host port, then open http://localhost:8080/...
+docker run --rm -p 8080:8000 -v "$(pwd)/data:/app/data" scqlog
+
+# Run the evaluation suite inside the container (no web server)
+docker run --rm -v "$(pwd)/data:/app/data" --entrypoint python scqlog \
+  -m eval.run_all data/samples.log      # reports land in data/samples_eval/
+```
+
+> **Note:** the container writes its output folders into the mounted directory. If you
+> mount a system log directory such as `/var/log/nginx` directly, copy the logs into
+> `data/` first unless you want the output folders created there.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Dashboard is blank or shows a fetch error | You opened the HTML via `file://`. Serve it over HTTP as shown above. |
+| `uv: command not found` / `uv is not recognized` | Reopen the terminal after installing uv, or add `~/.local/bin` (macOS/Linux) or `%USERPROFILE%\.local\bin` (Windows) to `PATH`. |
+| Docker: `no .log files found in /app/data` | The `-v` path is wrong or the directory has no `*.log` files. Use an absolute path or the `$(pwd)` / `${PWD}` / `%cd%` forms above. |
+| Docker: `port is already allocated` | Use a different host port, e.g. `-p 8080:8000`. |
+| Docker on Windows: `exec ./entrypoint.sh: no such file or directory` | `entrypoint.sh` was checked out with CRLF line endings. Delete `entrypoint.sh`, run `git checkout -- entrypoint.sh` to re-create it with LF endings, then rebuild. `.gitattributes` keeps it LF for fresh clones. |
+| Linux: permission errors when deleting outputs | The container created the files as root. Use `--user "$(id -u):$(id -g)"` as shown, or `sudo rm -r data/<basename>`. |
 
 ---
 
@@ -203,10 +313,10 @@ directory.
 ```
 scqlog/                          # Root of the repository
 ├── pyproject.toml               # Package metadata + `scqlog` console-script entry point
-├── requirements.txt             # Pinned dependency versions
-├── Dockerfile                   # Container definition
-├── docker-compose.yml           # Multi-container orchestration
-├── entrypoint.sh                # Docker entrypoint (runs `scqlog data/*.log`)
+├── uv.lock                      # Locked dependency versions (used by `uv sync` and Docker)
+├── .python-version              # Python version uv uses for the native install (3.11)
+├── Dockerfile                   # Container image (uv-based install)
+├── entrypoint.sh                # Docker entrypoint (runs scqlog on data/*.log, then serves data/)
 ├── data/                        # Place .log files here; outputs written next to each input
 │                                #   as <basename>/<basename>.{parquet,html}
 ├── scqlog/                      # Main Python package
@@ -436,22 +546,23 @@ method = '-'
 
 The `eval/` package quantifies the Score and Cluster signals. Every evaluation runs
 against any `.log` file the pipeline can already parse — no labelled ground-truth
-dataset is required. CSV + markdown reports are written to `eval_results/`
-(configurable via `--output-dir`).
+dataset is required. With `eval.run_all`, CSV + markdown reports are written next to
+the input log in `<basename>_eval/` (e.g. `data/access_eval/`); change this with
+`--output-dir`.
 
 ### Running an eval
 
 ```bash
 # All three at once (writes a README.md index in the output dir)
-python -m eval.run_all data/access.log
+uv run python -m eval.run_all data/access.log
 
 # Or one at a time
-python -m eval.paranoia_sensitivity   data/access.log
-python -m eval.cluster_stability      data/access.log --n-runs 10
-python -m eval.delimiter_sensitivity  data/access.log -pl 2
+uv run python -m eval.paranoia_sensitivity   data/access.log
+uv run python -m eval.cluster_stability      data/access.log --n-runs 10
+uv run python -m eval.delimiter_sensitivity  data/access.log -pl 2
 
 # Cap the number of lines parsed for quick iteration
-python -m eval.run_all data/access.log --max-lines 50000
+uv run python -m eval.run_all data/access.log --max-lines 50000
 ```
 
 ### What each eval measures

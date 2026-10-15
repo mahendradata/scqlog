@@ -209,3 +209,6 @@ __marimo__/
 # Inputs and outputs directory
 /data/*
 !/data/samples.log
+
+# Evaluation reports when --output-dir points outside data/
+/eval_results/

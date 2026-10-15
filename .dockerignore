@@ -32,9 +32,8 @@ dist/
 build/
 *.egg-info/
 
-# Project directories (mounted as volumes)
-inputs/
-outputs/
+# Data directory (bind-mounted at runtime, not baked into the image)
+data/
 
 # Environment files
 .env
